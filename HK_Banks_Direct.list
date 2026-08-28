@@ -1,10 +1,13 @@
-# > Standard Chartered Hong Kong
+# NAME: HK_Banks_Direct
+# DESC: Hong Kong banks other than HSBC HK and American Express
+
+# Standard Chartered Hong Kong
 URL-REGEX,^https?://www\.sc\.com/hk/
 DOMAIN,api.sc.com
 DOMAIN-SUFFIX,standardchartered.com.hk
 DOMAIN-KEYWORD,standardchartered-hk
 
-# > Traditional HK Banks
+# Traditional banks
 DOMAIN-SUFFIX,ccb.com.hk
 DOMAIN,asia.ccb.com
 DOMAIN-SUFFIX,bochk.com
@@ -33,7 +36,7 @@ DOMAIN-SUFFIX,citi.com.hk
 DOMAIN-SUFFIX,bankcomm.com.hk
 DOMAIN-SUFFIX,bodintl.com
 
-# > Virtual Banks
+# Virtual banks
 DOMAIN-SUFFIX,za.group
 DOMAIN-SUFFIX,livibank.com
 DOMAIN-SUFFIX,mox.com
