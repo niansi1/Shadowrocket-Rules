@@ -15,7 +15,7 @@ https://raw.githubusercontent.com/hanboyd/Shadowrocket-Rules/main/Shadowrocket.c
 - **AI / 银行 / 券商稳定出口** — 使用 `select` 手动选择，避免 `url-test` 自动切换 IP
 - **美国节点正则修复** — 移除过于宽泛的裸 `美` 字匹配
 - **移除无必要内容** — 删除 Google Rewrite / MITM、T-Mobile Wi-Fi Calling 规则
-- **大陆直连规则扩充** — 使用 Blackmatrix7 `ChinaMax` 规则集，优先匹配更完整的中国大陆域名和 IP；境外流量仍进入代理规则
+- **大陆直连规则扩充** — 按 Blackmatrix7 建议同时引用 `ChinaMax_Domain.list` 域名集和 `ChinaMax.list` IP/其他规则，国内域名优先直连，境外流量仍进入代理规则
 - **分流 DNS** — 直连与待判定域名使用 AliDNS / DNSPod 国内 DoH，失败时回退系统 DNS；代理域名由代理服务器端解析
 - **保留** — Tailscale TUN 排除、Apple 直连、Blackmatrix7 公共规则集
 
@@ -40,4 +40,4 @@ https://raw.githubusercontent.com/hanboyd/Shadowrocket-Rules/main/Shadowrocket.c
 
 ## 最后更新
 
-2026-09-10
+2026-09-12
