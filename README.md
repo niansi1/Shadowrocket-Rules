@@ -16,6 +16,7 @@ https://raw.githubusercontent.com/hanboyd/Shadowrocket-Rules/main/HB-Shadowrocke
 - **美国节点正则修复** — 移除过于宽泛的裸 `美` 字匹配
 - **移除无必要内容** — 删除 Google Rewrite / MITM、T-Mobile Wi-Fi Calling 规则
 - **大陆流量强制直连** — 同时引用 `ChinaMax_Domain.list` 域名集和 `ChinaMax.list` IP/其他规则，国内域名与中国大陆 IP 命中后直接使用 `DIRECT`，不经过可记忆选择的策略组
+- **国内 HTTPDNS 直连** — 微信、京东、阿里、哔哩哔哩、美团、网易、百度等国内应用的 HTTPDNS 入口直接放行，避免拒绝后等待超时和二次解析
 - **分流 DNS** — 直连与待判定域名使用 AliDNS / DNSPod 国内 DoH，失败时回退系统 DNS；代理域名由代理服务器端解析
 - **保留** — Tailscale TUN 排除、Apple 直连、Blackmatrix7 公共规则集
 
