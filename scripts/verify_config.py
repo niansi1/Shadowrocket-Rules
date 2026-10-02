@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Static Shadowrocket checks and first-match domain routing regressions.
 
-Run with --refresh to check current remote lists, or reuse .git/rule-audit.
+Run with --refresh to check external lists, or reuse .git/rule-audit.
+Repository lists are read locally; --published checks the uploaded copies too.
 This does not emulate iOS, DNS, IP/GeoIP, protocol, URL or User-Agent matching.
 """
 
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import hashlib
+from http.client import HTTPException
 import ipaddress
 import json
 from pathlib import Path
@@ -18,11 +20,17 @@ import re
 import subprocess
 import sys
 from urllib.request import Request, urlopen
+from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = "HB-Shadowrocket.conf"
+CONFIG = "Shadowrocket.conf"
+ALIAS = "HB-Shadowrocket.conf"
+OWN_URL = "https://raw.githubusercontent.com/niansi1/Shadowrocket-Rules/main/"
+SOURCE_URLS = ("https://raw.githubusercontent.com/LingJingMaster/Shadowrocket-Rules/refs/heads/main/",
+               "https://raw.githubusercontent.com/LingJingMaster/Shadowrocket-Rules/main/")
 AI, GOOGLE, YOUTUBE = "🤖 AI 服务", "🔍 谷歌服务", "📹 油管视频"
+DOMESTIC, MAIL, DNS_BLOCK = "🔒 国内服务", "📧 邮件服务", "🧱 DNS 防泄露"
 BUILTINS = {"DIRECT", "PROXY", "REJECT"}
 DOMAIN_TYPES = {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-WILDCARD"}
 OTHER_TYPES = {"IP-CIDR", "IP-CIDR6", "IP-ASN", "GEOIP", "USER-AGENT", "URL-REGEX", "AND"}
@@ -106,6 +114,13 @@ def parse_config(text):
             sections[section] = {}
         elif section == "Rule":
             rules.append(parse_rule(line, source))
+        elif section == "URL Rewrite":
+            parts = line.split()
+            require(len(parts) == 3 and parts[2] in {"301", "302", "307", "308"},
+                    f"{source}: unsupported URL rewrite")
+            re.compile(parts[0])
+            require(parts[0] not in sections[section], f"{source}: duplicate rewrite")
+            sections[section][parts[0]] = parts[1:]
         else:
             require(section is not None and "=" in line, f"{source}: expected key = value")
             key, value = (part.strip() for part in line.split("=", 1))
@@ -157,36 +172,73 @@ def parse_config(text):
     return sections, groups, rules
 
 
-def load_lists(rules, refresh, cache):
+def normalized(content):
+    return content.decode("utf-8-sig").replace("\r\n", "\n")
+
+
+def own_url(url):
+    for prefix in SOURCE_URLS:
+        if url.startswith(prefix):
+            return OWN_URL + url[len(prefix):]
+    return url
+
+
+def local_list(url):
+    if not url.startswith(OWN_URL):
+        return None
+    path = (ROOT / unquote(url[len(OWN_URL):])).resolve()
+    require(path.is_relative_to(ROOT) and path.suffix == ".list", f"Unsafe repository list URL: {url}")
+    return path
+
+
+def download(url):
+    request = Request(url, headers={"User-Agent": "Shadowrocket-Rules-static-check/1.0"})
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=40) as response:
+                return normalized(response.read())
+        except (OSError, HTTPException) as error:
+            if attempt == 2:
+                raise OSError(f"Download failed for {url}: {error}") from error
+
+
+def load_lists(rules, refresh, cache, published):
     urls = sorted({rule.value for rule in rules if rule.kind in REMOTE_TYPES})
     index_path = cache / "index.json"
     previous = json.loads(index_path.read_text(encoding="utf-8-sig")) if index_path.exists() else []
     previous_paths = {entry["url"]: ROOT / entry["path"].replace("\\", "/") for entry in previous}
 
     def fetch(url):
+        local = local_list(url)
+        if local:
+            content = normalized(local.read_bytes())
+            require(any(lines(content)), f"Empty repository list: {local}")
+            if published:
+                require(download(url) == content, f"Published list differs from local file: {url}")
+            return url, content, local, "published" if published else "local"
         path = previous_paths.get(url, cache / (hashlib.sha256(url.encode()).hexdigest() + ".list"))
         cached = path.exists() and not refresh
         if cached:
             content = path.read_text(encoding="utf-8-sig")
         else:
-            request = Request(url, headers={"User-Agent": "Shadowrocket-Rules-static-check/1.0"})
-            with urlopen(request, timeout=40) as response:
-                content = response.read().decode("utf-8-sig")
+            content = download(url)
             require(any(lines(content)), f"Empty remote list: {url}")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
         require(any(lines(content)), f"Empty rule list: {url}")
-        return url, content, path, cached
+        return url, content, path, "cached" if cached else "downloaded"
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = list(pool.map(fetch, urls))
     cache.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps([
         {"url": url, "path": str(path), "rules": sum(1 for _ in lines(content))}
-        for url, content, path, _ in results
+        for url, content, path, mode in results if mode in {"cached", "downloaded"}
     ], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    cached_count = sum(cached for _, _, _, cached in results)
-    print(f"Remote lists: {len(results) - cached_count} downloaded, {cached_count} cached (cached files do not prove current availability).")
+    counts = Counter(mode for _, _, _, mode in results)
+    print("Rule lists: " + ", ".join(f"{count} {mode}" for mode, count in sorted(counts.items())) + ".")
+    if counts["cached"]:
+        print("Cached files do not prove current remote availability.")
     return {url: content for url, content, _, _ in results}
 
 
@@ -243,7 +295,13 @@ www.gstatic.com fonts.googleapis.com storage.googleapis.com oauth2.googleapis.co
 www.googleapis.com apis.google.com lh3.googleusercontent.com
 """.split()
 TRANSLATE_CASES = ["translate.googleapis.com", "translate-pa.googleapis.com"]
-DOMESTIC_CASES = ["www.baidu.com", "www.bilibili.com", "doubao.com", "www.jd.com", "localhost.weixin.qq.com"]
+DOMESTIC_CASES = """
+www.baidu.com www.bilibili.com doubao.com www.jd.com deepseek.com deepseeksvc.com
+dns.weixin.qq.com dns.weixin.qq.com.cn weixin.com
+""".split()
+MAIL_CASES = """
+imap.gmail.com smtp.gmail.com pop.gmail.com outlook.office365.com p14-imap.mail.me.com
+""".split()
 NEGATIVE_CASES = """
 notebooklm.google.example.com labs.google.example.org example-labs.google.com
 notgemini.google.com gemini.gstatic.com.example.org notebooklm-pa.googleapis.com.example.org
@@ -251,14 +309,21 @@ aiplatform.googleapis.com.example.org us-central1-aiplatform.googleapis.com.exam
 """.split()
 
 
+PRESERVED_CASES = [(domain, GOOGLE) for domain in GOOGLE_CASES + ["voice.google.com", "voice.telephony.goog"]]
+PRESERVED_CASES += [(domain, YOUTUBE) for domain in TRANSLATE_CASES]
+PRESERVED_CASES += [(domain, DOMESTIC) for domain in DOMESTIC_CASES]
+PRESERVED_CASES += [(domain, MAIL) for domain in MAIL_CASES]
+PRESERVED_CASES += [(domain, DNS_BLOCK) for domain in ["dns.jd.com", "httpdns.alicdn.com"]]
+PRESERVED_CASES += [(domain, AI) for domain in ["chatgpt.com", "claude.ai", "guzzoni.apple.com", "mask.icloud.com", "apps.mzstatic.com"]]
+PRESERVED_CASES += [("localhost.weixin.qq.com", "DIRECT"), ("www.apple.com", "🍏 苹果服务"),
+                    ("www.hsbc.com.hk", "🏦 汇丰香港"), ("www.bochk.com", "🏦 香港银行"),
+                    ("www.futuhk.com", "📈 券商服务")]
+# Preserve existing YouTube/Google overlap rather than silently changing exits.
+PRESERVED_CASES += [("www.youtube.com", YOUTUBE), ("rr1---sn.example.googlevideo.com", GOOGLE), ("youtubei.googleapis.com", GOOGLE)]
+
+
 def check_routes(rules):
-    cases = [(domain, AI) for domain in AI_CASES]
-    cases += [(domain, GOOGLE) for domain in GOOGLE_CASES + ["voice.google.com", "voice.telephony.goog"]]
-    cases += [(domain, YOUTUBE) for domain in TRANSLATE_CASES]
-    cases += [(domain, "DIRECT") for domain in DOMESTIC_CASES]
-    cases += [("chatgpt.com", AI), ("claude.ai", AI)]
-    # Preserve existing YouTube/Google overlap rather than silently changing exits.
-    cases += [("www.youtube.com", YOUTUBE), ("rr1---sn.example.googlevideo.com", GOOGLE), ("youtubei.googleapis.com", GOOGLE)]
+    cases = [(domain, AI) for domain in AI_CASES] + PRESERVED_CASES
     failures = []
     for domain, expected in cases:
         found = match(domain, rules)
@@ -274,14 +339,15 @@ def check_routes(rules):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--refresh", action="store_true", help="download every referenced list; fail on network errors")
-    parser.add_argument("--baseline-ref", help="also compare ordinary routes and the Google group with this Git revision")
+    parser.add_argument("--refresh", action="store_true", help="download all external lists; repository lists stay local before publishing")
+    parser.add_argument("--published", action="store_true", help="also fetch published configs and repository lists and compare them with local files")
+    parser.add_argument("--baseline-ref", help="compare preserved settings, lists and routes with an upstream Git revision, e.g. lingjing/main")
     parser.add_argument("--config", type=Path, default=ROOT / CONFIG)
     parser.add_argument("--cache-dir", type=Path, default=ROOT / ".git" / "rule-audit")
     args = parser.parse_args()
+    require(args.config.read_bytes() == (ROOT / ALIAS).read_bytes(), "Canonical config and HB compatibility alias differ")
     sections, groups, rules = parse_config(args.config.read_text(encoding="utf-8-sig"))
-    require(sections["General"].get("update-url") ==
-            "https://raw.githubusercontent.com/niansi1/Shadowrocket-Rules/main/HB-Shadowrocket.conf",
+    require(sections["General"].get("update-url") == OWN_URL + CONFIG,
             "update-url must point to the maintained niansi1 repository")
     ai_group = groups[AI]
     ai_default = ai_group[2].get("policy-select-name", ai_group[1][0])
@@ -289,7 +355,23 @@ def main():
     manual = groups[ai_default]
     require(manual[0] == "select" and manual[2].get("policy-regex-filter") and not manual[1],
             "AI's default must select individual filtered nodes, without an automatic child group")
-    contents = load_lists(rules, args.refresh, args.cache_dir)
+    for name, expected in {GOOGLE: "🇯🇵 日本节点", MAIL: "PROXY", DNS_BLOCK: "REJECT",
+                           DOMESTIC: "DIRECT", "🍏 苹果服务": "DIRECT", "🏦 汇丰香港": "DIRECT",
+                           "🏦 香港银行": "DIRECT", "📈 券商服务": "🇭🇰 香港节点"}.items():
+        _, members, options = groups[name]
+        require(options.get("policy-select-name", members[0]) == expected, f"{name}: upstream default changed")
+    for name in [ai_default, "🇺🇸 美国节点"]:
+        pattern = groups[name][2]["policy-regex-filter"]
+        require(re.search(pattern, "美国 01") and not re.search(pattern, "南美 智利 01"),
+                f"{name}: US filter must not capture South America via bare 美")
+    require(re.search(groups["🌐 其他节点"][2]["policy-regex-filter"], "南美 智利 01"),
+            "Other-node filter must retain South American nodes")
+    contents = load_lists(rules, args.refresh, args.cache_dir, args.published)
+    if args.published:
+        for filename in [CONFIG, ALIAS]:
+            require(download(OWN_URL + filename) == normalized((ROOT / filename).read_bytes()),
+                    f"Published config differs from local file: {filename}")
+        print("Published canonical and compatibility configs match local files (normalized line endings).")
     expanded = expand(rules, contents)
     print(f"Structure: {len(groups)} policy groups and {len(expanded)} expanded rules checked.")
     skipped = Counter(rule.kind for rule in expanded if rule.kind in OTHER_TYPES)
@@ -299,13 +381,27 @@ def main():
         revision = subprocess.check_output(
             ["git", "rev-parse", "--verify", "--end-of-options", args.baseline_ref + "^{commit}"], cwd=ROOT, text=True).strip()
         baseline_text = subprocess.check_output(["git", "show", f"{revision}:{CONFIG}"], cwd=ROOT).decode("utf-8-sig")
-        _, old_groups, old_rules = parse_config(baseline_text)
-        require(groups[GOOGLE] == old_groups[GOOGLE], "Ordinary Google policy group changed from baseline")
-        old_expanded = expand(old_rules, contents)
-        for domain in GOOGLE_CASES + TRANSLATE_CASES + DOMESTIC_CASES:
+        old_sections, old_groups, old_rules = parse_config(baseline_text)
+        for section in old_sections.keys() - {"Rule", "Proxy Group"}:
+            old = {key: value for key, value in old_sections[section].items() if key != "update-url"}
+            new = {key: value for key, value in sections[section].items() if key != "update-url"}
+            require(old == new, f"[{section}] changed beyond the update URL")
+        for name in old_groups.keys() - {AI, "🇺🇸 美国节点", "🌐 其他节点"}:
+            require(groups[name] == old_groups[name], f"{name}: group changed from upstream baseline")
+        names = subprocess.check_output(["git", "ls-tree", "--name-only", revision], cwd=ROOT, text=True).splitlines()
+        for name in (name for name in names if name.endswith(".list")):
+            original = subprocess.check_output(["git", "show", f"{revision}:{name}"], cwd=ROOT)
+            require(normalized((ROOT / name).read_bytes()) == normalized(original), f"Upstream rule copy changed: {name}")
+        preserved = [(rule.kind, rule.value, rule.policy) for rule in rules
+                     if not (rule.policy == AI and rule.kind in DOMAIN_TYPES)]
+        original = [(rule.kind, own_url(rule.value), rule.policy) for rule in old_rules]
+        require(preserved == original, "Existing rule order or policies changed from upstream")
+        old_contents = {rule.value: contents[own_url(rule.value)] for rule in old_rules if rule.kind in REMOTE_TYPES}
+        old_expanded = expand(old_rules, old_contents)
+        for domain, _ in PRESERVED_CASES:
             require(match(domain, expanded).policy == match(domain, old_expanded).policy,
                     f"Ordinary route changed from baseline: {domain}")
-        print(f"Baseline {args.baseline_ref}: Google policy group and {len(GOOGLE_CASES + TRANSLATE_CASES + DOMESTIC_CASES)} ordinary routes unchanged.")
+        print(f"Baseline {args.baseline_ref}: original settings, rule order, copied lists, other groups and {len(PRESERVED_CASES)} service routes preserved.")
     print("PASS: static checks only; verify selected nodes and actual connections in Shadowrocket on iOS.")
 
 
